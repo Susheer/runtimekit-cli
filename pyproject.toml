@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runtimekit-cli"
+version = "0.1.0"
+description = "Generic CLI for scaffolding and managing modular runtime applications."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+  { name = "RuntimeKit Contributors" }
+]
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Software Development :: Code Generators"
+]
+
+[project.scripts]
+runtimekit = "runtimekit_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/runtimekit-cli"
+Repository = "https://github.com/OWNER/runtimekit-cli"
+Issues = "https://github.com/OWNER/runtimekit-cli/issues"
+
+[tool.setuptools]
+packages = ["runtimekit_cli"]
