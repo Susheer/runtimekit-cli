@@ -27,9 +27,9 @@ classifiers = [
 runtimekit = "runtimekit_cli.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/runtimekit-cli"
-Repository = "https://github.com/OWNER/runtimekit-cli"
-Issues = "https://github.com/OWNER/runtimekit-cli/issues"
+Homepage = "https://github.com/Susheer/runtimekit-cli"
+Repository = "https://github.com/Susheer/runtimekit-cli"
+Issues = "https://github.com/Susheer/runtimekit-cli/issues"
 
 [tool.setuptools]
 packages = ["runtimekit_cli"]
