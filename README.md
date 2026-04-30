@@ -15,7 +15,7 @@ python -m pip install runtimekit-cli
 From GitHub before publishing:
 
 ```bash
-python -m pip install "runtimekit-cli @ git+https://github.com/OWNER/runtimekit-cli.git"
+python -m pip install "runtimekit-cli @ git+https://github.com/Susheer/runtimekit-cli.git"
 ```
 
 ## Configure
