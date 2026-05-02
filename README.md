@@ -38,7 +38,7 @@ runtimekit config show
 
 ```bash
 runtimekit doctor
-runtimekit add module APP.WorkOrders --backend --store
+runtimekit add module APP.WorkOrders --menu-parent Operations
 runtimekit add page APP.WorkOrders WorkOrderDetails
 runtimekit add store APP.WorkOrders WorkOrdersStore
 runtimekit add dependency APP.WorkOrders OTHER.SharedFeature
@@ -53,6 +53,20 @@ runtimekit remove module APP.WorkOrders --dry-run
 ```
 
 Destructive commands require `--yes` unless `--dry-run` is used.
+
+## Design-Aware Scaffolding
+
+`runtimekit add module` now creates a full starter module instead of a blank shell:
+
+- Three visible pages in the same navigation group.
+- A module-scoped frontend store with fake data for every generated page.
+- Backend route and service files returning sample data.
+- `module.json` page, menu, navigation, icon, restore-state, and keep-alive metadata.
+- MUI/platform UI page templates using cards, metrics, status pills, and data tables.
+
+`runtimekit add page` adds the new page under the module's existing navigation group by default,
+updates store page metadata, refreshes sample data, and keeps the generated frontend module export
+aligned with `module.json`.
 
 ## Release Artifacts
 

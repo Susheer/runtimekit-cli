@@ -50,6 +50,10 @@ def module_key(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower()) or "module"
 
 
+def js_string(value):
+    return json.dumps(str(value or ""))
+
+
 def parse_properties(source):
     result = {}
     for raw_line in str(source or "").splitlines():
@@ -158,6 +162,26 @@ class ChangeSet:
         prefix = "Would " if self.dry_run else ""
         for change in self.changes:
             print(prefix + change)
+
+
+GENERATED_MARKER = "RuntimeKit generated"
+
+
+def is_runtimekit_generated(path):
+    target = Path(path)
+    if not target.exists():
+        return True
+    text = target.read_text(encoding="utf-8")
+    return GENERATED_MARKER in text or "module.exports = { pages: [] }" in text
+
+
+def write_generated_text(changes, path, content, force=False):
+    target = Path(path)
+    if target.exists() and not force and not is_runtimekit_generated(target):
+        changes.changes.append("skip custom " + str(target))
+        return False
+    changes.write_text(target, content, overwrite=target.exists())
+    return True
 
 
 def require_yes(args, action):
@@ -374,51 +398,97 @@ class Workspace:
         return resolve_workspace_path(self, candidate or configured)
 
 
+def infer_icon(value):
+    normalized = kebab_case(value)
+    if any(token in normalized for token in ("meter", "electric", "power")):
+        return "bolt"
+    if any(token in normalized for token in ("inventory", "stock", "product", "order", "work")):
+        return "inventory"
+    if any(token in normalized for token in ("receipt", "invoice", "log")):
+        return "logs"
+    if any(token in normalized for token in ("report", "analytic", "insight", "dashboard")):
+        return "apps"
+    return "apps"
+
+
+def create_page_record(page_id, page_title, menu_parent, order, icon, group_id, group_label):
+    return {
+        "id": page_id,
+        "pageType": page_id,
+        "name": page_title,
+        "title": page_title,
+        "component": page_id + "Page.jsx",
+        "icon": icon,
+        "menu": {
+            "label": page_title,
+            "parent": menu_parent,
+            "groupId": group_id,
+            "groupLabel": group_label,
+            "icon": icon,
+            "groupIcon": icon,
+            "visible": True,
+        },
+        "navigation": {
+            "id": group_id + "." + kebab_case(page_id),
+            "label": page_title,
+            "parent": menu_parent,
+            "groupId": group_id,
+            "groupLabel": group_label,
+            "icon": icon,
+            "groupIcon": icon,
+            "visible": True,
+        },
+        "multiInstance": True,
+        "restoreState": True,
+        "keepAlive": True,
+        "order": order,
+    }
+
+
+def default_module_pages(tail, page_id, page_title, options):
+    key = options.module_key or module_key(tail)
+    icon = getattr(options, "icon", None) or infer_icon(tail)
+    group_id = getattr(options, "group_id", None) or key
+    group_label = getattr(options, "group_label", None) or page_title
+    menu_parent = getattr(options, "menu_parent", None) or "Operations"
+    base_order = getattr(options, "order", 0)
+    definitions = [
+        (page_id, page_title, base_order),
+        (page_id + "Queue", page_title + " Queue", base_order + 10),
+        (page_id + "Insights", page_title + " Insights", base_order + 20),
+    ]
+    return [
+        create_page_record(item_id, item_title, menu_parent, item_order, icon, group_id, group_label)
+        for item_id, item_title, item_order in definitions
+    ]
+
+
+def create_backend_metadata(tail):
+    service_name = module_key(tail) + "Service"
+    return {
+        "routePrefix": "/" + kebab_case(tail),
+        "routes": [
+            {
+                "path": "/api/" + kebab_case(tail),
+                "methods": ["GET"],
+                "permissions": ["read"],
+            }
+        ],
+        "services": [
+            {
+                "name": service_name,
+                "methods": ["list" + pascal_case(tail)],
+            }
+        ],
+    }
+
+
 def create_module_manifest(module_name, page_id, page_title, options):
     app_name, tail = parse_module_name(module_name)
     key = options.module_key or module_key(tail)
-    pages = []
-    stores = []
-
-    if not options.no_page:
-        pages.append(
-            {
-                "id": page_id,
-                "pageType": page_id,
-                "name": page_title,
-                "title": page_title,
-                "component": page_id + "Page.jsx",
-                "menu": {
-                    "label": page_title,
-                    "parent": options.menu_parent,
-                },
-                "multiInstance": True,
-                "order": options.order,
-            }
-        )
-
-    if options.store:
-        store_name = pascal_case(tail) + "Store"
-        stores.append({"name": store_name, "pages": [page_id] if pages else []})
-
-    backend = {"routes": [], "services": []}
-    if options.backend:
-        service_name = module_key(tail) + "Service"
-        backend = {
-            "routes": [
-                {
-                    "path": "/api/" + kebab_case(tail),
-                    "methods": ["GET"],
-                    "permissions": ["read"],
-                }
-            ],
-            "services": [
-                {
-                    "name": service_name,
-                    "methods": ["list" + pascal_case(tail)],
-                }
-            ],
-        }
+    icon = getattr(options, "icon", None) or infer_icon(tail)
+    pages = default_module_pages(tail, page_id, page_title, options)
+    store_name = pascal_case(tail) + "Store"
 
     return {
         "name": module_name,
@@ -428,43 +498,62 @@ def create_module_manifest(module_name, page_id, page_title, options):
         "description": options.description or page_title + " module.",
         "dependencies": [],
         "pages": pages,
-        "backend": backend,
+        "backend": create_backend_metadata(tail),
         "frontend": {
             "entry": "./frontend/module.js",
-            "stores": stores,
+            "stores": [{"name": store_name, "scope": "module", "pages": [page["id"] for page in pages]}],
             "slots": [],
         },
         "permissions": {
-            "read": "user",
-            "write": "admin",
+            "read": ["role:operator", "role:admin"],
+            "write": ["role:admin"],
         },
         "metadata": {
+            "title": page_title,
+            "icon": icon,
             "category": options.menu_parent.lower(),
+            "description": options.description or page_title + " module.",
             "tags": ["generated", app_name.lower()],
         },
     }
 
 
-def frontend_module_template(page_id, tail):
-    method = "load" + pascal_case(tail)
-    return """const moduleDefinition = {
-  pages: [
-    {
-      id: '""" + page_id + """',
-      name: '""" + title_case(page_id) + """',
-      component: '""" + page_id + """Page'
-    }
-  ],
+def component_name_for_page(page_id):
+    return pascal_case(page_id) + "Page"
 
-  onOpen: async (pageId, store) => {
-    if (pageId === '""" + page_id + """' && store.getState().""" + method + """) {
-      await store.getState().""" + method + """();
+
+def frontend_module_template(pages, tail):
+    page_entries = [
+        {
+            "id": page["id"],
+            "name": page.get("name") or page.get("title") or page["id"],
+            "title": page.get("title") or page.get("name") or page["id"],
+            "component": page["id"] + "Page",
+            "icon": page.get("icon") or infer_icon(tail),
+            "order": page.get("order", 0),
+        }
+        for page in pages
+    ]
+    return """// RuntimeKit generated module definition. Keep module.json as the source of navigation truth.
+const moduleDefinition = {
+  pages: """ + json.dumps(page_entries, indent=2) + """,
+
+  onOpen: async (pageId, store, params) => {
+    if (store.getState().load) {
+      await store.getState().load(pageId, params || {});
     }
   },
 
-  onFocus: async () => {},
+  onFocus: async (_pageId, store) => {
+    if (store.getState().activate) {
+      store.getState().activate();
+    }
+  },
 
   onBlur: async (_pageId, store) => {
+    if (store.getState().deactivate) {
+      store.getState().deactivate();
+    }
     if (store.getState().pausePolling) {
       store.getState().pausePolling();
     }
@@ -481,101 +570,250 @@ module.exports = moduleDefinition;
 """
 
 
-def page_template(component_name, title):
+def page_template(component_name, page):
+    page_id = page["id"]
+    title = page.get("title") or page.get("name") or page_id
+    description = "Sample " + title.lower() + " workspace generated by RuntimeKit."
     return """const React = require('@platform/react');
+const TypographyModule = require('@mui/material/Typography');
+const { DataTable, MetricCard, PageCard, StatusPill } = require('@platform/ui');
 
-const """ + component_name + """ = ({ store }) => {
-  const items = store((state) => state.items || []);
-  const loading = store((state) => state.loading);
-  const error = store((state) => state.error);
+const Typography = TypographyModule && TypographyModule.default ? TypographyModule.default : TypographyModule;
+const PAGE_ID = """ + js_string(page_id) + """;
+const PAGE_TITLE = """ + js_string(title) + """;
 
-  React.useEffect(() => {
-    return () => {};
-  }, [store]);
+function """ + component_name + """(props) {
+  const store = props.store;
+  const params = props.params || {};
+  const records = store(function selectRecords(state) {
+    return state.records || [];
+  });
+  const loading = store(function selectLoading(state) {
+    return state.loading;
+  });
+  const hasLoaded = store(function selectHasLoaded(state) {
+    return state.hasLoaded;
+  });
+  const source = store(function selectSource(state) {
+    return state.source || 'sample';
+  });
+  const activeCount = records.filter(function countActive(record) {
+    return record.status === 'Active' || record.status === 'In Progress';
+  }).length;
+  const totalValue = records.reduce(function sumValue(total, record) {
+    return total + Number(record.value || 0);
+  }, 0);
 
-  if (loading) {
-    return <div>Loading...</div>;
-  }
-
-  if (error) {
-    return <div>{error}</div>;
-  }
+  React.useEffect(
+    function ensurePageData() {
+      if (!hasLoaded && !loading && store.getState().load) {
+        store.getState().load(PAGE_ID, params).catch(function ignoreLoadError() {});
+      }
+    },
+    [hasLoaded, loading, params, store]
+  );
 
   return (
-    <div className="card">
-      <h1>""" + title + """</h1>
-      <p className="content-copy">Generated runtime page.</p>
-      <div>{items.length} item(s)</div>
-    </div>
+    <PageCard>
+      <Typography component="h1" className="content-heading" variant="h4">{PAGE_TITLE}</Typography>
+      <Typography component="p" className="content-copy" variant="body1">
+        """ + description + """
+      </Typography>
+      <div className="diagnostics-grid">
+        <MetricCard label="Records" value={String(records.length)} />
+        <MetricCard label="Active" value={String(activeCount)} />
+        <MetricCard label="Value" value={String(totalValue)} />
+        <MetricCard label="Source" value={source === 'runtime' ? 'Runtime' : 'Sample'} />
+      </div>
+      {loading ? (
+        <div className="diagnostic-card">
+          <Typography component="p" className="diagnostic-label" variant="caption">Status</Typography>
+          <Typography component="p" className="diagnostic-value" variant="h6">Loading...</Typography>
+        </div>
+      ) : null}
+      <DataTable>
+        <thead>
+          <tr>
+            <th>Reference</th>
+            <th>Owner</th>
+            <th>Status</th>
+            <th>Priority</th>
+            <th>Value</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map(function renderRecord(record) {
+            return (
+              <tr key={record.id}>
+                <td>{record.reference}</td>
+                <td>{record.owner}</td>
+                <td><StatusPill label={record.status} color={record.status === 'Blocked' ? 'default' : 'primary'} /></td>
+                <td>{record.priority}</td>
+                <td>{record.value}</td>
+                <td>{record.updatedAt}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </DataTable>
+    </PageCard>
   );
-};
+}
 
 module.exports = """ + component_name + """;
 """
 
 
-def store_template(store_name, tail):
-    method = "load" + pascal_case(tail)
+def sample_records_for_pages(pages, tail):
+    statuses = ["Active", "In Progress", "Ready", "Blocked"]
+    priorities = ["High", "Medium", "Normal", "Low"]
+    owners = ["Operations", "Planning", "Field Team", "Supervisor"]
+    payload = {}
+    for page_index, page in enumerate(pages):
+        records = []
+        page_id = page["id"]
+        label = kebab_case(page_id).upper()
+        for index in range(4):
+            records.append(
+                {
+                    "id": kebab_case(page_id) + "-" + str(index + 1),
+                    "reference": label + "-" + str(100 + index + page_index * 10),
+                    "owner": owners[(index + page_index) % len(owners)],
+                    "status": statuses[(index + page_index) % len(statuses)],
+                    "priority": priorities[(index + page_index) % len(priorities)],
+                    "value": (page_index + 1) * 25 + index * 7,
+                    "updatedAt": "2026-05-" + str(10 + index).zfill(2),
+                }
+            )
+        payload[page_id] = records
+    payload["default"] = payload[pages[0]["id"]] if pages else []
+    return payload
+
+
+def store_template(store_name, tail, pages):
     route_path = "/api/" + kebab_case(tail)
-    return """const { createRuntimeStore, fetchJson } = require('@platform/services');
+    sample_data = sample_records_for_pages(pages, tail)
+    return """// RuntimeKit generated store with resilient sample data.
+const { createRuntimeStore, fetchJson } = require('@platform/services');
+
+const SAMPLE_DATA = """ + json.dumps(sample_data, indent=2) + """;
+
+function cloneRecords(records) {
+  return (Array.isArray(records) ? records : []).map(function cloneRecord(record) {
+    return Object.assign({}, record);
+  });
+}
+
+function recordsForPage(pageId) {
+  return cloneRecords(SAMPLE_DATA[pageId] || SAMPLE_DATA.default || []);
+}
+
+function normalizeResponse(response, pageId) {
+  if (Array.isArray(response)) {
+    return cloneRecords(response);
+  }
+  if (response && Array.isArray(response.data)) {
+    return cloneRecords(response.data);
+  }
+  return recordsForPage(pageId);
+}
 
 function create""" + store_name + """() {
-  return createRuntimeStore((set, get) => ({
-    items: [],
-    loading: false,
-    error: null,
-    pollingInterval: null,
+  return createRuntimeStore(function configureStore(set, get) {
+    return {
+      records: recordsForPage('default'),
+      loading: false,
+      error: null,
+      source: 'sample',
+      hasLoaded: false,
+      active: false,
+      lastPageId: 'default',
+      lastParams: {},
+      pollingInterval: null,
 
-    """ + method + """: async () => {
-      set({ loading: true, error: null });
-      try {
-        const result = await fetchJson('""" + route_path + """');
-        set({ items: result.data || [], loading: false });
-      } catch (error) {
-        set({ error: error.message, loading: false });
+      load: async function load(pageId, params) {
+        const nextPageId = pageId || 'default';
+        const nextParams = params || {};
+        set({ loading: true, error: null, lastPageId: nextPageId, lastParams: nextParams });
+
+        try {
+          const response = await fetchJson('""" + route_path + """?page=' + encodeURIComponent(nextPageId));
+          const records = normalizeResponse(response, nextPageId);
+          set({ records: records, loading: false, hasLoaded: true, source: 'runtime', error: null });
+          return records;
+        } catch (error) {
+          const records = recordsForPage(nextPageId);
+          set({ records: records, loading: false, hasLoaded: true, source: 'sample', error: null });
+          return records;
+        }
+      },
+
+      reload: function reload() {
+        const state = get();
+        return get().load(state.lastPageId, state.lastParams);
+      },
+
+      activate: function activate() {
+        set({ active: true });
+      },
+
+      deactivate: function deactivate() {
+        set({ active: false });
+      },
+
+      startPolling: function startPolling() {
+        if (get().pollingInterval) {
+          return;
+        }
+        const pollingInterval = setInterval(function refresh() {
+          get().reload().catch(function ignorePollingError() {});
+        }, 10000);
+        set({ pollingInterval: pollingInterval });
+      },
+
+      pausePolling: function pausePolling() {
+        const state = get();
+        if (state.pollingInterval) {
+          clearInterval(state.pollingInterval);
+          set({ pollingInterval: null });
+        }
+      },
+
+      cleanup: function cleanup() {
+        get().pausePolling();
+        set({ active: false });
       }
-    },
-
-    startPolling: () => {
-      const pollingInterval = setInterval(() => {
-        get().""" + method + """().catch(function ignorePollingError() {});
-      }, 5000);
-      set({ pollingInterval });
-    },
-
-    pausePolling: () => {
-      const state = get();
-      if (state.pollingInterval) {
-        clearInterval(state.pollingInterval);
-        set({ pollingInterval: null });
-      }
-    },
-
-    cleanup: () => {
-      get().pausePolling();
-      set({ items: [], error: null });
-    }
-  }));
+    };
+  });
 }
 
 module.exports = create""" + store_name + """;
 """
 
 
-def service_template(tail):
+def service_template(tail, pages):
     method = "list" + pascal_case(tail)
-    return """async function """ + method + """() {
-  try {
-    return {
-      success: true,
-      data: []
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
-  }
+    sample_data = sample_records_for_pages(pages, tail)
+    return """// RuntimeKit generated backend service with sample data.
+const SAMPLE_DATA = """ + json.dumps(sample_data, indent=2) + """;
+
+function cloneRecords(records) {
+  return (Array.isArray(records) ? records : []).map(function cloneRecord(record) {
+    return Object.assign({}, record);
+  });
+}
+
+async function """ + method + """(pageId) {
+  const records = SAMPLE_DATA[pageId] || SAMPLE_DATA.default || [];
+  return {
+    success: true,
+    data: cloneRecords(records),
+    meta: {
+      source: 'sample',
+      pageId: pageId || 'default'
+    }
+  };
 }
 
 module.exports = {
@@ -587,26 +825,17 @@ module.exports = {
 def routes_template(tail):
     method = "list" + pascal_case(tail)
     route_path = "/api/" + kebab_case(tail)
-    return """const express = require('express');
+    return """// RuntimeKit generated backend routes.
+const express = require('express');
 const router = express.Router();
 const service = require('./service');
 
 router.get('""" + route_path + """', async (req, res) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const result = await service.""" + method + """();
-    if (!result || result.success !== true) {
-      return res.status(500).json({
-        error: result && result.error ? result.error : 'Failed to load data'
-      });
-    }
-
+    const result = await service.""" + method + """(req.query && req.query.page);
     return res.status(200).json(result);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -646,26 +875,25 @@ def cmd_add_module(args):
     module_root = workspace.modules_root(app_name) / args.module
     changes = ChangeSet(args.dry_run, args.force)
     manifest = create_module_manifest(args.module, page_id, page_title, args)
+    pages = manifest["pages"]
+    store_name = pascal_case(tail) + "Store"
 
     changes.write_json(module_root / "module.json", manifest, overwrite=False)
-    changes.write_text(module_root / "frontend" / "module.js", frontend_module_template(page_id, tail))
+    changes.write_text(module_root / "frontend" / "module.js", frontend_module_template(pages, tail))
 
-    if not args.no_page:
+    for page in pages:
         changes.write_text(
-            module_root / "frontend" / "pages" / (page_id + "Page.jsx"),
-            page_template(page_id + "Page", page_title),
+            module_root / "frontend" / "pages" / (page["id"] + "Page.jsx"),
+            page_template(component_name_for_page(page["id"]), page),
         )
 
-    if args.store:
-        store_name = pascal_case(tail) + "Store"
-        changes.write_text(
-            module_root / "frontend" / "stores" / (store_name + ".js"),
-            store_template(store_name, tail),
-        )
+    changes.write_text(
+        module_root / "frontend" / "stores" / (store_name + ".js"),
+        store_template(store_name, tail, pages),
+    )
 
-    if args.backend:
-        changes.write_text(module_root / "backend" / "service.js", service_template(tail))
-        changes.write_text(module_root / "backend" / "routes.js", routes_template(tail))
+    changes.write_text(module_root / "backend" / "service.js", service_template(tail, pages))
+    changes.write_text(module_root / "backend" / "routes.js", routes_template(tail))
 
     add_descriptor_module(workspace, changes, app_name, args.module)
     changes.print_summary()
@@ -677,7 +905,8 @@ def ensure_frontend_module(workspace, changes, module_name):
     root = workspace.module_root(module_name)
     frontend_module = root / "frontend" / "module.js"
     if not frontend_module.exists():
-        changes.write_text(frontend_module, frontend_module_template(pascal_case(tail), tail))
+        manifest = workspace.load_module_manifest(module_name)
+        changes.write_text(frontend_module, frontend_module_template(manifest.get("pages", []), tail))
 
 
 def append_page(manifest, page):
@@ -690,6 +919,60 @@ def append_page(manifest, page):
     return True
 
 
+def manifest_page_defaults(manifest, tail):
+    pages = manifest.get("pages") if isinstance(manifest.get("pages"), list) else []
+    first_page = pages[0] if pages else {}
+    first_menu = first_page.get("menu") if isinstance(first_page.get("menu"), dict) else {}
+    first_navigation = (
+        first_page.get("navigation") if isinstance(first_page.get("navigation"), dict) else {}
+    )
+    icon = (
+        first_navigation.get("groupIcon")
+        or first_menu.get("groupIcon")
+        or first_navigation.get("icon")
+        or first_menu.get("icon")
+        or first_page.get("icon")
+        or (manifest.get("metadata") or {}).get("icon")
+        or infer_icon(tail)
+    )
+    return {
+        "parent": first_navigation.get("parent") or first_menu.get("parent") or "Operations",
+        "groupId": first_navigation.get("groupId") or first_menu.get("groupId") or module_key(tail),
+        "groupLabel": (
+            first_navigation.get("groupLabel")
+            or first_menu.get("groupLabel")
+            or (manifest.get("metadata") or {}).get("title")
+            or title_case(tail)
+        ),
+        "icon": icon,
+    }
+
+
+def ensure_store_metadata(manifest, tail):
+    pages = manifest.setdefault("pages", [])
+    frontend = manifest.setdefault("frontend", {})
+    frontend.setdefault("entry", "./frontend/module.js")
+    stores = frontend.setdefault("stores", [])
+    page_ids = [page.get("id") for page in pages if page.get("id")]
+    store_name = pascal_case(tail) + "Store"
+    if not stores:
+        stores.append({"name": store_name, "scope": "module", "pages": page_ids})
+        return store_name
+
+    first_store = stores[0]
+    if isinstance(first_store, str):
+        stores[0] = {"name": first_store, "scope": "module", "pages": page_ids}
+        return first_store
+
+    first_store.setdefault("name", store_name)
+    first_store["scope"] = first_store.get("scope") or "module"
+    store_pages = first_store.setdefault("pages", [])
+    for page_id in page_ids:
+        if page_id not in store_pages:
+            store_pages.append(page_id)
+    return first_store["name"]
+
+
 def cmd_add_page(args):
     workspace = Workspace.discover(args.workspace)
     app_name, tail = parse_module_name(args.module)
@@ -699,25 +982,47 @@ def cmd_add_page(args):
 
     page_id = args.page_id or pascal_case(args.page)
     page_title = args.title or title_case(args.page)
-    page = {
-        "id": page_id,
-        "pageType": page_id,
-        "name": page_title,
-        "title": page_title,
-        "component": page_id + "Page.jsx",
-        "menu": {"label": page_title, "parent": args.menu_parent},
-        "multiInstance": True,
-        "order": args.order,
-    }
     changes = ChangeSet(args.dry_run, args.force)
     manifest = read_json(manifest_path)
+    defaults = manifest_page_defaults(manifest, tail)
+    menu_parent = args.menu_parent or defaults["parent"]
+    group_id = args.group_id or defaults["groupId"]
+    group_label = args.group_label or defaults["groupLabel"]
+    icon = args.icon or defaults["icon"]
+    page = create_page_record(page_id, page_title, menu_parent, args.order, icon, group_id, group_label)
     append_page(manifest, page)
+    pages = manifest.get("pages", [])
+    store_name = ensure_store_metadata(manifest, tail)
+    upsert_backend_metadata(manifest, tail)
     changes.write_json(manifest_path, manifest, overwrite=True)
     changes.write_text(
         workspace.module_root(args.module) / "frontend" / "pages" / (page_id + "Page.jsx"),
-        page_template(page_id + "Page", page_title),
+        page_template(component_name_for_page(page_id), page),
     )
-    ensure_frontend_module(workspace, changes, args.module)
+    write_generated_text(
+        changes,
+        workspace.module_root(args.module) / "frontend" / "module.js",
+        frontend_module_template(pages, tail),
+        force=args.force,
+    )
+    write_generated_text(
+        changes,
+        workspace.module_root(args.module) / "frontend" / "stores" / (store_name + ".js"),
+        store_template(store_name, tail, pages),
+        force=args.force,
+    )
+    write_generated_text(
+        changes,
+        workspace.module_root(args.module) / "backend" / "service.js",
+        service_template(tail, pages),
+        force=args.force,
+    )
+    write_generated_text(
+        changes,
+        workspace.module_root(args.module) / "backend" / "routes.js",
+        routes_template(tail),
+        force=args.force,
+    )
     changes.print_summary()
     return 0
 
@@ -734,13 +1039,13 @@ def cmd_add_store(args):
     frontend.setdefault("entry", "./frontend/module.js")
     stores = frontend.setdefault("stores", [])
     if not any((entry == store_name) or (isinstance(entry, dict) and entry.get("name") == store_name) for entry in stores):
-        stores.append({"name": store_name, "pages": args.page or []})
+        stores.append({"name": store_name, "scope": "module", "pages": args.page or []})
 
     changes = ChangeSet(args.dry_run, args.force)
     changes.write_json(manifest_path, manifest, overwrite=True)
     changes.write_text(
         workspace.module_root(args.module) / "frontend" / "stores" / (store_name + ".js"),
-        store_template(store_name, tail),
+        store_template(store_name, tail, manifest.get("pages", [])),
     )
     ensure_frontend_module(workspace, changes, args.module)
     changes.print_summary()
@@ -749,6 +1054,7 @@ def cmd_add_store(args):
 
 def upsert_backend_metadata(manifest, tail):
     backend = manifest.setdefault("backend", {})
+    backend.setdefault("routePrefix", "/" + kebab_case(tail))
     routes = backend.setdefault("routes", [])
     services = backend.setdefault("services", [])
     route_path = "/api/" + kebab_case(tail)
@@ -776,7 +1082,7 @@ def cmd_add_backend(args):
     changes = ChangeSet(args.dry_run, args.force)
     changes.write_json(manifest_path, manifest, overwrite=True)
     root = workspace.module_root(args.module)
-    changes.write_text(root / "backend" / "service.js", service_template(tail))
+    changes.write_text(root / "backend" / "service.js", service_template(tail, manifest.get("pages", [])))
     changes.write_text(root / "backend" / "routes.js", routes_template(tail))
     changes.print_summary()
     return 0
@@ -1364,12 +1670,15 @@ def build_parser():
     add_module = add_sub.add_parser("module", help="Add a new app-owned module.")
     add_write_options(add_module)
     add_module.add_argument("module")
-    add_module.add_argument("--backend", action="store_true")
-    add_module.add_argument("--store", action="store_true")
-    add_module.add_argument("--no-page", action="store_true")
+    add_module.add_argument("--backend", action="store_true", help="Deprecated: modules include backend scaffolding by default.")
+    add_module.add_argument("--store", action="store_true", help="Deprecated: modules include a store by default.")
+    add_module.add_argument("--no-page", action="store_true", help="Deprecated: generated modules always include starter pages.")
     add_module.add_argument("--page-id")
     add_module.add_argument("--title")
     add_module.add_argument("--menu-parent", default="Operations")
+    add_module.add_argument("--group-id")
+    add_module.add_argument("--group-label")
+    add_module.add_argument("--icon")
     add_module.add_argument("--order", type=int, default=0)
     add_module.add_argument("--description")
     add_module.add_argument("--module-key")
@@ -1381,7 +1690,10 @@ def build_parser():
     add_page.add_argument("page")
     add_page.add_argument("--page-id")
     add_page.add_argument("--title")
-    add_page.add_argument("--menu-parent", default="Operations")
+    add_page.add_argument("--menu-parent")
+    add_page.add_argument("--group-id")
+    add_page.add_argument("--group-label")
+    add_page.add_argument("--icon")
     add_page.add_argument("--order", type=int, default=0)
     add_page.set_defaults(func=cmd_add_page)
 

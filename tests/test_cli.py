@@ -170,8 +170,6 @@ class RuntimeKitCliTests(unittest.TestCase):
                 "DLMS.WorkOrders",
                 "--workspace",
                 str(self.root),
-                "--backend",
-                "--store",
                 "--menu-parent",
                 "Operations",
                 "--order",
@@ -187,14 +185,23 @@ class RuntimeKitCliTests(unittest.TestCase):
         self.assertTrue((module_root / "backend/service.js").exists())
         self.assertTrue((module_root / "frontend/module.js").exists())
         self.assertTrue((module_root / "frontend/pages/WorkOrdersPage.jsx").exists())
+        self.assertTrue((module_root / "frontend/pages/WorkOrdersQueuePage.jsx").exists())
+        self.assertTrue((module_root / "frontend/pages/WorkOrdersInsightsPage.jsx").exists())
         self.assertTrue((module_root / "frontend/stores/WorkOrdersStore.js").exists())
 
         manifest = read_json(module_root / "module.json")
         self.assertEqual(manifest["name"], "DLMS.WorkOrders")
         self.assertEqual(manifest["moduleKey"], "workorders")
-        self.assertEqual(manifest["pages"][0]["id"], "WorkOrders")
+        self.assertEqual([page["id"] for page in manifest["pages"]], ["WorkOrders", "WorkOrdersQueue", "WorkOrdersInsights"])
+        self.assertEqual(manifest["pages"][0]["menu"]["groupId"], "workorders")
+        self.assertEqual(manifest["pages"][0]["menu"]["groupLabel"], "Work Orders")
+        self.assertEqual(manifest["pages"][0]["menu"]["icon"], "inventory")
+        self.assertEqual(manifest["pages"][1]["navigation"]["groupId"], "workorders")
         self.assertEqual(manifest["backend"]["routes"][0]["path"], "/api/work-orders")
+        self.assertEqual(manifest["backend"]["routePrefix"], "/work-orders")
         self.assertEqual(manifest["frontend"]["stores"][0]["name"], "WorkOrdersStore")
+        self.assertEqual(manifest["frontend"]["stores"][0]["scope"], "module")
+        self.assertEqual(manifest["frontend"]["stores"][0]["pages"], ["WorkOrders", "WorkOrdersQueue", "WorkOrdersInsights"])
 
         descriptor = read_json(self.root / "apps/DLMS/Platform/modules/module-descriptor.json")
         names = [entry["name"] for entry in descriptor["modules"]]
@@ -286,10 +293,14 @@ class RuntimeKitCliTests(unittest.TestCase):
         )
         page_ids = [page["id"] for page in manifest["pages"]]
         self.assertIn("WorkOrderDetails", page_ids)
+        detail_page = next(page for page in manifest["pages"] if page["id"] == "WorkOrderDetails")
+        self.assertEqual(detail_page["menu"]["groupId"], "workorders")
+        self.assertEqual(detail_page["navigation"]["groupLabel"], "Work Orders")
         self.assertIn("OMS.ReceiptModule", manifest["dependencies"])
         self.assertEqual(manifest["backend"]["routes"][0]["path"], "/api/work-orders")
         store_names = [store["name"] for store in manifest["frontend"]["stores"]]
         self.assertIn("WorkOrdersDetailStore", store_names)
+        self.assertIn("WorkOrderDetails", manifest["frontend"]["stores"][0]["pages"])
 
         descriptor = read_json(self.root / "apps/DLMS/Platform/modules/module-descriptor.json")
         self.assertEqual(descriptor["includes"][0]["module"], "OMS.ReceiptModule")
