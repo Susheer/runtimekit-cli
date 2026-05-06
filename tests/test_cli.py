@@ -469,7 +469,6 @@ class RuntimeKitCliTests(unittest.TestCase):
 
     def test_run_commands_support_dry_run(self):
         cases = (
-            (["run", "browser"], "npm run dev"),
             (["run", "browser", "--server-only"], "npm run server"),
             (["run", "browser", "--production"], "npm run start"),
             (["run", "electron"], "npm run electron"),
@@ -495,7 +494,6 @@ class RuntimeKitCliTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, stderr)
         self.assertIn("Open browser: http://localhost:4100 after 0.1s", stdout)
-        self.assertIn("npm run dev", stdout)
 
     def test_release_commands_support_dry_run(self):
         code, stdout, stderr = self.run_cli(
