@@ -50,6 +50,11 @@ def module_key(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower()) or "module"
 
 
+def service_key(tail, app_name):
+    scope = normalize_app_name(app_name).lower()
+    return scope + pascal_case(tail) + "Service"
+
+
 def js_string(value):
     return json.dumps(str(value or ""))
 
@@ -125,6 +130,10 @@ def resolve_workspace_path(workspace, candidate):
     if path.is_absolute():
         return path
     return workspace.root / path
+
+
+def normalize_resource_path(value):
+    return str(value or "").replace("\\", "/").lstrip("./").lstrip("/")
 
 
 class ChangeSet:
@@ -318,6 +327,9 @@ class Workspace:
     def descriptor_path(self, app_name):
         return self.modules_root(app_name) / "module-descriptor.json"
 
+    def app_root(self, app_name):
+        return self.modules_root(app_name).parent
+
     def load_descriptor(self, app_name):
         path = self.descriptor_path(app_name)
         if path.exists():
@@ -415,27 +427,14 @@ def create_page_record(page_id, page_title, menu_parent, order, icon, group_id, 
     return {
         "id": page_id,
         "pageType": page_id,
-        "name": page_title,
         "title": page_title,
-        "component": page_id + "Page.jsx",
+        "component": page_id + "Page",
         "icon": icon,
         "menu": {
             "label": page_title,
             "parent": menu_parent,
             "groupId": group_id,
             "groupLabel": group_label,
-            "icon": icon,
-            "groupIcon": icon,
-            "visible": True,
-        },
-        "navigation": {
-            "id": group_id + "." + kebab_case(page_id),
-            "label": page_title,
-            "parent": menu_parent,
-            "groupId": group_id,
-            "groupLabel": group_label,
-            "icon": icon,
-            "groupIcon": icon,
             "visible": True,
         },
         "multiInstance": True,
@@ -463,34 +462,18 @@ def default_module_pages(tail, page_id, page_title, options):
     ]
 
 
-def create_backend_metadata(tail, app_name):
+def create_backend_contract(tail, app_name):
     scope = normalize_app_name(app_name).lower()
-    service_name = module_key(tail) + "Service"
     return {
+        "entry": "./backend/module.js",
         "routePrefix": f"/api/{scope}/{kebab_case(tail)}",
-        "routes": [
-            {
-                "path": "/",
-                "methods": ["GET"],
-                "permissions": ["read"],
-            },
-            {
-                "path": "/module-info",
-                "methods": ["GET"],
-                "permissions": ["read"],
-            },
-        ],
-        "services": [service_name],
-        "initOrder": 30,
     }
 
 
 def create_module_manifest(module_name, page_id, page_title, options):
     app_name, tail = parse_module_name(module_name)
     key = options.module_key or module_key(tail)
-    icon = getattr(options, "icon", None) or infer_icon(tail)
     pages = default_module_pages(tail, page_id, page_title, options)
-    store_name = pascal_case(tail) + "Store"
 
     return {
         "name": module_name,
@@ -500,23 +483,9 @@ def create_module_manifest(module_name, page_id, page_title, options):
         "description": options.description or page_title + " module.",
         "dependencies": [],
         "pages": pages,
-        "backend": create_backend_metadata(tail, app_name),
+        "backend": create_backend_contract(tail, app_name),
         "frontend": {
             "entry": "./frontend/module.js",
-            "pageTypes": [page.get("pageType") for page in pages],
-            "stores": [{"name": store_name, "scope": "module", "pages": [page["id"] for page in pages]}],
-            "slots": [],
-        },
-        "permissions": {
-            "read": ["role:operator", "role:admin"],
-            "write": ["role:admin"],
-        },
-        "metadata": {
-            "title": (app_name + " " + page_title) if app_name else page_title,
-            "icon": icon,
-            "category": (getattr(options, "menu_parent", "Operations") or "").lower(),
-            "description": options.description or page_title + " module.",
-            "tags": ["generated", app_name.lower()],
         },
     }
 
@@ -526,50 +495,115 @@ def component_name_for_page(page_id):
 
 
 def frontend_module_template(pages, tail):
+    store_name = pascal_case(tail) + "Store"
     page_entries = [
         {
             "id": page["id"],
-            "name": page.get("name") or page.get("title") or page["id"],
-            "title": page.get("title") or page.get("name") or page["id"],
-            "component": page["id"] + "Page",
+            "title": page.get("title") or page["id"],
+            "pageType": page.get("pageType") or page["id"],
+            "componentSymbol": component_name_for_page(page["id"]),
             "icon": page.get("icon") or infer_icon(tail),
             "order": page.get("order", 0),
         }
         for page in pages
     ]
+    component_requires = "\n".join(
+        "const "
+        + page["componentSymbol"]
+        + " = require('./pages/"
+        + page["id"]
+        + "Page.jsx');"
+        for page in page_entries
+    )
+    component_map_entries = ",\n  ".join(
+        js_string(page["id"]) + ": " + page["componentSymbol"] for page in page_entries
+    )
     return """// RuntimeKit generated module definition. Keep module.json as the source of navigation truth.
-const moduleDefinition = {
-  pages: """ + json.dumps(page_entries, indent=2) + """,
+const React = require('@platform/react');
+const { defineModule } = require('@platform/module');
+const { registerPage } = require('@platform/pages');
+const moduleManifest = require('../module.json');
+const create""" + store_name + """ = require('./stores/""" + store_name + """');
+""" + component_requires + """
 
-  onOpen: async (pageId, store, params) => {
-    if (store.getState().load) {
-      await store.getState().load(pageId, params || {});
-    }
-  },
-
-  onFocus: async (_pageId, store) => {
-    if (store.getState().activate) {
-      store.getState().activate();
-    }
-  },
-
-  onBlur: async (_pageId, store) => {
-    if (store.getState().deactivate) {
-      store.getState().deactivate();
-    }
-    if (store.getState().pausePolling) {
-      store.getState().pausePolling();
-    }
-  },
-
-  dispose: async (_pageId, store) => {
-    if (store.getState().cleanup) {
-      store.getState().cleanup();
-    }
-  }
+const PAGE_COMPONENTS = {
+  """ + component_map_entries + """
 };
 
-module.exports = moduleDefinition;
+module.exports = defineModule({
+  name: moduleManifest.name,
+  register: function registerRuntimeKitModule(context) {
+    moduleManifest.pages.forEach(function registerRuntimeKitPage(pageDefinition) {
+      const PageComponent = PAGE_COMPONENTS[pageDefinition.id];
+      if (!PageComponent) {
+        throw new Error("Missing RuntimeKit page component for '" + pageDefinition.id + "'.");
+      }
+
+      registerPage(context.registry, pageDefinition.pageType || pageDefinition.id, {
+        title: pageDefinition.title || pageDefinition.id,
+        icon: pageDefinition.icon || null,
+        menu: pageDefinition.menu || null,
+        order: typeof pageDefinition.order === 'number' ? pageDefinition.order : 0,
+        pageOptions: {
+          multiInstance: pageDefinition.multiInstance !== false,
+          restoreState: pageDefinition.restoreState !== false,
+          keepAlive: pageDefinition.keepAlive !== false
+        },
+        createInstance: function createInstance(pageContext) {
+          const store = create""" + store_name + """();
+
+          return {
+            title: pageDefinition.title || pageDefinition.id,
+            store: store,
+            render: function renderRuntimeKitPage() {
+              return React.createElement(PageComponent, {
+                store: store,
+                params: pageContext.params,
+                pageId: pageContext.id,
+                moduleName: moduleManifest.name
+              });
+            },
+            onOpen: function onOpen() {
+              if (store.getState().load) {
+                return store.getState().load(pageDefinition.id, pageContext.params || {});
+              }
+              return undefined;
+            },
+            onFocus: function onFocus() {
+              if (store.getState().activate) {
+                store.getState().activate();
+              }
+            },
+            onBlur: function onBlur() {
+              if (store.getState().deactivate) {
+                store.getState().deactivate();
+              }
+              if (store.getState().pausePolling) {
+                store.getState().pausePolling();
+              }
+            },
+            onClose: function onClose() {
+              if (store.getState().cleanup) {
+                store.getState().cleanup();
+              }
+            },
+            dispose: function dispose() {
+              if (store.getState().cleanup) {
+                store.getState().cleanup();
+              }
+            }
+          };
+        }
+      });
+    });
+
+    return {
+      onInit: async function onInit() {
+        return true;
+      }
+    };
+  }
+});
 """
 
 
@@ -857,6 +891,23 @@ module.exports = router;
 """
 
 
+def backend_module_template(tail, app_name):
+    key = service_key(tail, app_name)
+    return """// RuntimeKit generated backend entry.
+const router = require('./routes');
+const service = require('./service');
+
+async function initBackend(runtime, manifest) {
+  runtime.container.register('""" + key + """', service);
+  runtime.mountRouter(manifest.backend.routePrefix, router);
+}
+
+module.exports = {
+  initBackend
+};
+"""
+
+
 def add_descriptor_module(workspace, changes, app_name, module_name):
     descriptor = workspace.load_descriptor(app_name)
     modules = descriptor.setdefault("modules", [])
@@ -876,6 +927,151 @@ def add_descriptor_module(workspace, changes, app_name, module_name):
             }
         )
     changes.write_json(workspace.descriptor_path(app_name), descriptor, overwrite=True)
+
+
+def resolve_theme_target_app(workspace, app_name=None):
+    if app_name:
+        target_app = normalize_app_name(app_name)
+        source = "option:--app"
+    else:
+        target_app, source = workspace.root_app()
+    if not target_app:
+        raise CliError("No root app is configured. Pass --app <external-app> or set root.app in local.properties.")
+    if target_app == "core":
+        raise CliError("The default runtime theme is protected. Choose an external app; core/DISC cannot be edited.")
+    app_definition = workspace.find_app(target_app)
+    if not app_definition:
+        raise CliError("Unknown app '" + target_app + "'.")
+    return target_app, source
+
+
+def app_theme_namespace(app_name, explicit_namespace=None):
+    return explicit_namespace or normalize_app_name(app_name)
+
+
+def theme_set_template(app_name, namespace):
+    title = title_case(app_name)
+    return """// RuntimeKit generated root-app theme set.
+module.exports = {
+  namespace: '""" + namespace + """',
+  activate: 'light',
+  themeSet: {
+    light: {
+      bg: '#f7f1eb',
+      panel: '#fffdf8',
+      panelStrong: '#efe7d8',
+      text: '#231a12',
+      textMuted: '#6f5b48',
+      brand: '#9d174d',
+      brandStrong: '#701a75',
+      brandSoft: '#fce7f3',
+      chrome: '#272016',
+      chromeSoft: '#443421',
+      border: '#d8cab8',
+      classification: '#7f1d1d',
+      warning: '#b45309',
+      success: '#3f6212',
+      olive: '#4d7c0f',
+      footer: '#20150f',
+      rail: '#eadfcb',
+      railText: '#4d3a2b',
+      railActiveBg: '#fffdf8',
+      railIconBg: '#7c3f10',
+      railIconActiveBg: '#9d174d',
+      panelHover: '#f7eadf',
+      dangerText: '#991b1b',
+      dangerSoft: '#fee2e2',
+      fontFamily: 'Aptos, "Segoe UI", Roboto, Arial, sans-serif',
+      borderRadius: 4,
+      density: 'comfortable',
+      spacingUnit: 10
+    },
+    dark: {
+      bg: '#120f1a',
+      panel: '#1f1828',
+      panelStrong: '#2f2337',
+      text: '#fff7ed',
+      textMuted: '#d6c4b5',
+      brand: '#f472b6',
+      brandStrong: '#fde047',
+      brandSoft: '#4a1735',
+      chrome: '#09070d',
+      chromeSoft: '#241729',
+      border: '#59435e',
+      classification: '#fca5a5',
+      warning: '#facc15',
+      success: '#bef264',
+      olive: '#a3e635',
+      footer: '#09070d',
+      rail: '#1b1424',
+      railText: '#d6c4b5',
+      railActiveBg: '#2f2337',
+      railIconBg: '#4a1735',
+      railIconActiveBg: '#f472b6',
+      panelHover: '#392840',
+      dangerText: '#fecaca',
+      dangerSoft: '#3f1d23',
+      fontFamily: 'Aptos, "Segoe UI", Roboto, Arial, sans-serif',
+      borderRadius: 4,
+      density: 'comfortable',
+      spacingUnit: 10
+    }
+  },
+  label: '""" + title + """ custom theme'
+};
+"""
+
+
+def theme_css_template(app_name):
+    class_name = kebab_case(app_name) + "-root-theme"
+    return """/* RuntimeKit generated root-app theme marker. */
+.""" + class_name + """ {
+  color: var(--brand);
+}
+"""
+
+
+def write_keep_file(changes, path):
+    changes.write_text(path / ".gitkeep", "\n", overwrite=True)
+
+
+def cmd_add_theme(args):
+    workspace = Workspace.discover(args.workspace)
+    app_name, source = resolve_theme_target_app(workspace, args.app)
+    descriptor = workspace.load_descriptor(app_name)
+    if descriptor.get("ownership") == "core":
+        raise CliError("The default runtime theme is protected. Core descriptors cannot be edited.")
+
+    namespace = app_theme_namespace(app_name, args.namespace)
+    app_root = workspace.app_root(app_name)
+    theme_set = normalize_resource_path(args.theme_set or "styles/themeset.js")
+    style_path = normalize_resource_path(args.style or ("styles/" + kebab_case(app_name) + ".css"))
+    assets_path = normalize_resource_path(args.assets or "assets")
+    static_path = normalize_resource_path(args.static or "static")
+
+    if descriptor.get("themeSet") and descriptor.get("themeSet") != theme_set and not args.force:
+        raise CliError(
+            "App '" + app_name + "' already has themeSet '" + descriptor.get("themeSet") + "'. Use --force to replace it."
+        )
+
+    styles = descriptor.get("styles") if isinstance(descriptor.get("styles"), list) else []
+    if style_path not in styles:
+        styles.append(style_path)
+
+    descriptor["themeSet"] = theme_set
+    descriptor["styles"] = styles
+    descriptor.setdefault("assets", assets_path)
+    descriptor.setdefault("static", static_path)
+
+    changes = ChangeSet(args.dry_run, args.force)
+    changes.write_json(workspace.descriptor_path(app_name), descriptor, overwrite=True)
+    changes.write_text(app_root / theme_set, theme_set_template(app_name, namespace), overwrite=args.force)
+    changes.write_text(app_root / style_path, theme_css_template(app_name), overwrite=args.force)
+    write_keep_file(changes, app_root / assets_path)
+    write_keep_file(changes, app_root / static_path)
+    changes.print_summary()
+    print("Theme target: " + app_name + " (" + source + ")")
+    return 0
 
 
 def cmd_add_module(args):
@@ -908,6 +1104,7 @@ def cmd_add_module(args):
 
     changes.write_text(module_root / "backend" / "service.js", service_template(tail, pages))
     changes.write_text(module_root / "backend" / "routes.js", routes_template(tail))
+    changes.write_text(module_root / "backend" / "module.js", backend_module_template(tail, app_name))
 
     add_descriptor_module(workspace, changes, app_name, args.module)
     changes.print_summary()
@@ -933,6 +1130,56 @@ def append_page(manifest, page):
     return True
 
 
+def sanitize_page_record(page, tail):
+    if not isinstance(page, dict):
+        return None
+    page_id = page.get("id")
+    if not page_id:
+        return None
+    menu = page.get("menu") if isinstance(page.get("menu"), dict) else {}
+    navigation = page.get("navigation") if isinstance(page.get("navigation"), dict) else {}
+    title = page.get("title") or page.get("name") or menu.get("label") or page_id
+    icon = page.get("icon") or navigation.get("icon") or navigation.get("groupIcon") or infer_icon(tail)
+    group_label = menu.get("groupLabel") or navigation.get("groupLabel") or title
+    group_id = menu.get("groupId") or navigation.get("groupId") or module_key(group_label)
+    return {
+        "id": page_id,
+        "pageType": page.get("pageType") or page_id,
+        "title": title,
+        "component": page.get("component") or page_id + "Page",
+        "icon": icon,
+        "menu": {
+            "label": menu.get("label") or title,
+            "parent": menu.get("parent") or navigation.get("parent") or "Operations",
+            "groupId": group_id,
+            "groupLabel": group_label,
+            "visible": menu.get("visible", navigation.get("visible", True)),
+        },
+        "multiInstance": page.get("multiInstance", True),
+        "restoreState": page.get("restoreState", True),
+        "keepAlive": page.get("keepAlive", True),
+        "order": page.get("order", 0),
+    }
+
+
+def sanitize_module_manifest(manifest, tail, app_name, include_backend=None):
+    pages = []
+    for page in manifest.get("pages", []):
+        sanitized = sanitize_page_record(page, tail)
+        if sanitized:
+            pages.append(sanitized)
+    manifest["pages"] = pages
+    manifest["frontend"] = {"entry": "./frontend/module.js"}
+    should_include_backend = ("backend" in manifest) if include_backend is None else include_backend
+    if should_include_backend:
+        manifest["backend"] = create_backend_contract(tail, app_name)
+    else:
+        manifest.pop("backend", None)
+    manifest.pop("permissions", None)
+    manifest.pop("metadata", None)
+    return manifest
+
+
 def manifest_page_defaults(manifest, tail):
     pages = manifest.get("pages") if isinstance(manifest.get("pages"), list) else []
     first_page = pages[0] if pages else {}
@@ -946,7 +1193,6 @@ def manifest_page_defaults(manifest, tail):
         or first_navigation.get("icon")
         or first_menu.get("icon")
         or first_page.get("icon")
-        or (manifest.get("metadata") or {}).get("icon")
         or infer_icon(tail)
     )
     return {
@@ -955,36 +1201,14 @@ def manifest_page_defaults(manifest, tail):
         "groupLabel": (
             first_navigation.get("groupLabel")
             or first_menu.get("groupLabel")
-            or (manifest.get("metadata") or {}).get("title")
             or title_case(tail)
         ),
         "icon": icon,
     }
 
 
-def ensure_store_metadata(manifest, tail):
-    pages = manifest.setdefault("pages", [])
-    frontend = manifest.setdefault("frontend", {})
-    frontend.setdefault("entry", "./frontend/module.js")
-    stores = frontend.setdefault("stores", [])
-    page_ids = [page.get("id") for page in pages if page.get("id")]
-    store_name = pascal_case(tail) + "Store"
-    if not stores:
-        stores.append({"name": store_name, "scope": "module", "pages": page_ids})
-        return store_name
-
-    first_store = stores[0]
-    if isinstance(first_store, str):
-        stores[0] = {"name": first_store, "scope": "module", "pages": page_ids}
-        return first_store
-
-    first_store.setdefault("name", store_name)
-    first_store["scope"] = first_store.get("scope") or "module"
-    store_pages = first_store.setdefault("pages", [])
-    for page_id in page_ids:
-        if page_id not in store_pages:
-            store_pages.append(page_id)
-    return first_store["name"]
+def ensure_store_name(manifest, tail):
+    return pascal_case(tail) + "Store"
 
 
 def cmd_add_page(args):
@@ -998,6 +1222,7 @@ def cmd_add_page(args):
     page_title = args.title or title_case(args.page)
     changes = ChangeSet(args.dry_run, args.force)
     manifest = read_json(manifest_path)
+    sanitize_module_manifest(manifest, tail, app_name, include_backend=True)
     defaults = manifest_page_defaults(manifest, tail)
     menu_parent = args.menu_parent or defaults["parent"]
     group_id = args.group_id or defaults["groupId"]
@@ -1006,8 +1231,9 @@ def cmd_add_page(args):
     page = create_page_record(page_id, page_title, menu_parent, args.order, icon, group_id, group_label)
     append_page(manifest, page)
     pages = manifest.get("pages", [])
-    store_name = ensure_store_metadata(manifest, tail)
-    upsert_backend_metadata(manifest, tail, app_name)
+    store_name = ensure_store_name(manifest, tail)
+    upsert_backend_contract(manifest, tail, app_name)
+    sanitize_module_manifest(manifest, tail, app_name, include_backend=True)
     changes.write_json(manifest_path, manifest, overwrite=True)
     changes.write_text(
         workspace.module_root(args.module) / "frontend" / "pages" / (page_id + "Page.jsx"),
@@ -1037,6 +1263,12 @@ def cmd_add_page(args):
         routes_template(tail),
         force=args.force,
     )
+    write_generated_text(
+        changes,
+        workspace.module_root(args.module) / "backend" / "module.js",
+        backend_module_template(tail, app_name),
+        force=args.force,
+    )
     changes.print_summary()
     return 0
 
@@ -1049,11 +1281,7 @@ def cmd_add_store(args):
         raise CliError("Module does not exist: " + args.module)
     manifest = read_json(manifest_path)
     store_name = args.store_name or pascal_case(tail) + "Store"
-    frontend = manifest.setdefault("frontend", {})
-    frontend.setdefault("entry", "./frontend/module.js")
-    stores = frontend.setdefault("stores", [])
-    if not any((entry == store_name) or (isinstance(entry, dict) and entry.get("name") == store_name) for entry in stores):
-        stores.append({"name": store_name, "scope": "module", "pages": args.page or []})
+    sanitize_module_manifest(manifest, tail, app_name)
 
     changes = ChangeSet(args.dry_run, args.force)
     changes.write_json(manifest_path, manifest, overwrite=True)
@@ -1066,25 +1294,8 @@ def cmd_add_store(args):
     return 0
 
 
-def upsert_backend_metadata(manifest, tail, app_name):
-    scope = normalize_app_name(app_name).lower()
-    backend = manifest.setdefault("backend", {})
-    backend.setdefault("routePrefix", f"/api/{scope}/{kebab_case(tail)}")
-    routes = backend.setdefault("routes", [])
-    services = backend.setdefault("services", [])
-    backend.setdefault("initOrder", 30)
-    route_path = "/"
-    service_name = module_key(tail) + "Service"
-    method = "list" + pascal_case(tail)
-    # Ensure base list route exists (relative path)
-    if not any(isinstance(route, dict) and route.get("path") == route_path for route in routes):
-        routes.append({"path": route_path, "methods": ["GET"], "permissions": ["read"]})
-    # Ensure module-info diagnostic route exists
-    if not any(isinstance(route, dict) and route.get("path") == "/module-info" for route in routes):
-        routes.append({"path": "/module-info", "methods": ["GET"], "permissions": ["read"]})
-    # Services may be strings or dicts; prefer a simple string service entry
-    if not any((service == service_name) or (isinstance(service, dict) and service.get("name") == service_name) for service in services):
-        services.append(service_name)
+def upsert_backend_contract(manifest, tail, app_name):
+    manifest["backend"] = create_backend_contract(tail, app_name)
 
 
 def cmd_add_backend(args):
@@ -1094,13 +1305,15 @@ def cmd_add_backend(args):
     if not manifest_path.exists():
         raise CliError("Module does not exist: " + args.module)
     manifest = read_json(manifest_path)
-    upsert_backend_metadata(manifest, tail, app_name)
+    upsert_backend_contract(manifest, tail, app_name)
+    sanitize_module_manifest(manifest, tail, app_name, include_backend=True)
 
     changes = ChangeSet(args.dry_run, args.force)
     changes.write_json(manifest_path, manifest, overwrite=True)
     root = workspace.module_root(args.module)
     changes.write_text(root / "backend" / "service.js", service_template(tail, manifest.get("pages", [])))
     changes.write_text(root / "backend" / "routes.js", routes_template(tail))
+    changes.write_text(root / "backend" / "module.js", backend_module_template(tail, app_name))
     changes.print_summary()
     return 0
 
@@ -1134,6 +1347,8 @@ def cmd_add_dependency(args):
         raise CliError("Dependency module does not exist: " + args.dependency)
     manifest_path = workspace.module_manifest_path(args.module)
     manifest = read_json(manifest_path)
+    app_name, tail = parse_module_name(args.module)
+    sanitize_module_manifest(manifest, tail, app_name)
     dependencies = manifest.setdefault("dependencies", [])
     labels = {dependency_label(item) for item in dependencies}
     if args.dependency not in labels:
@@ -1556,6 +1771,66 @@ def remove_module_from_descriptor(workspace, module_name, changes):
         changes.write_json(workspace.descriptor_path(app_name), descriptor, overwrite=True)
 
 
+def remove_generated_theme_file(changes, path, dry_run=False, force=False):
+    target = Path(path)
+    if not target.exists():
+        return
+    if target.is_dir():
+        remove_path(target, dry_run=dry_run)
+        return
+    if force or is_runtimekit_generated(target):
+        remove_path(target, dry_run=dry_run)
+    else:
+        changes.changes.append("skip custom " + str(target))
+
+
+def cmd_remove_theme(args):
+    require_yes(args, "Removing an app theme")
+    workspace = Workspace.discover(args.workspace)
+    app_name, source = resolve_theme_target_app(workspace, args.app)
+    descriptor = workspace.load_descriptor(app_name)
+    if descriptor.get("ownership") == "core":
+        raise CliError("The default runtime theme is protected. Core descriptors cannot be edited.")
+
+    app_root = workspace.app_root(app_name)
+    theme_set = normalize_resource_path(descriptor.get("themeSet"))
+    styles = descriptor.get("styles") if isinstance(descriptor.get("styles"), list) else []
+    assets_path = normalize_resource_path(descriptor.get("assets"))
+    static_path = normalize_resource_path(descriptor.get("static"))
+
+    descriptor.pop("themeSet", None)
+    descriptor.pop("styles", None)
+    descriptor.pop("assets", None)
+    descriptor.pop("static", None)
+
+    changes = ChangeSet(args.dry_run, args.force)
+    changes.write_json(workspace.descriptor_path(app_name), descriptor, overwrite=True)
+    changes.print_summary()
+
+    if args.keep_files:
+        print("Keeping theme files for " + app_name)
+        print("Theme target: " + app_name + " (" + source + ")")
+        return 0
+
+    file_changes = ChangeSet(args.dry_run, args.force)
+    if theme_set:
+        remove_generated_theme_file(file_changes, app_root / theme_set, dry_run=args.dry_run, force=args.force)
+    for style_path in styles:
+        normalized_style = normalize_resource_path(style_path)
+        if normalized_style:
+            remove_generated_theme_file(file_changes, app_root / normalized_style, dry_run=args.dry_run, force=args.force)
+    if args.remove_resource_dirs:
+        if assets_path:
+            remove_generated_theme_file(file_changes, app_root / assets_path, dry_run=args.dry_run, force=True)
+        if static_path:
+            remove_generated_theme_file(file_changes, app_root / static_path, dry_run=args.dry_run, force=True)
+
+    if file_changes.changes:
+        file_changes.print_summary()
+    print("Theme target: " + app_name + " (" + source + ")")
+    return 0
+
+
 def cmd_remove_module(args):
     require_yes(args, "Removing a module")
     workspace = Workspace.discover(args.workspace)
@@ -1741,6 +2016,16 @@ def build_parser():
     add_dependency.add_argument("--allow-missing", action="store_true")
     add_dependency.set_defaults(func=cmd_add_dependency)
 
+    add_theme = add_sub.add_parser("theme", help="Add a custom root-app theme for an external app.")
+    add_write_options(add_theme)
+    add_theme.add_argument("--app", help="External app to theme. Defaults to root.app from local.properties.")
+    add_theme.add_argument("--namespace", help="Theme namespace. Defaults to the normalized app name.")
+    add_theme.add_argument("--theme-set", help="Descriptor themeSet path relative to the app runtime folder.")
+    add_theme.add_argument("--style", help="CSS style path relative to the app runtime folder.")
+    add_theme.add_argument("--assets", help="Assets folder path relative to the app runtime folder.")
+    add_theme.add_argument("--static", help="Static folder path relative to the app runtime folder.")
+    add_theme.set_defaults(func=cmd_add_theme)
+
     remove = subparsers.add_parser("remove", help="Remove generated or manually-created framework pieces.")
     remove_sub = remove.add_subparsers(dest="remove_command")
 
@@ -1753,6 +2038,16 @@ def build_parser():
     remove_module.add_argument("--keep-files", action="store_true")
     remove_module.add_argument("--keep-references", action="store_true")
     remove_module.set_defaults(func=cmd_remove_module)
+
+    remove_theme = remove_sub.add_parser("theme", help="Remove an external app custom theme.")
+    add_common(remove_theme)
+    remove_theme.add_argument("--app", help="External app theme to remove. Defaults to root.app from local.properties.")
+    remove_theme.add_argument("--dry-run", action="store_true")
+    remove_theme.add_argument("--yes", action="store_true")
+    remove_theme.add_argument("--force", action="store_true", help="Remove theme files even when they were not generated by RuntimeKit.")
+    remove_theme.add_argument("--keep-files", action="store_true")
+    remove_theme.add_argument("--remove-resource-dirs", action="store_true", help="Also remove assets/static directories.")
+    remove_theme.set_defaults(func=cmd_remove_theme)
 
     inspect = subparsers.add_parser("inspect", help="Inspect generated runtime state.")
     inspect_sub = inspect.add_subparsers(dest="inspect_command")

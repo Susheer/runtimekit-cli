@@ -145,16 +145,27 @@ class RuntimeKitCliTests(unittest.TestCase):
                     {
                         "id": page_id,
                         "pageType": page_id,
-                        "name": page_id,
                         "title": page_id,
-                        "component": page_id + "Page.jsx",
-                        "menu": {"label": page_id, "parent": "Operations"},
+                        "component": page_id + "Page",
+                        "icon": "apps",
+                        "menu": {
+                            "label": page_id,
+                            "parent": "Operations",
+                            "groupId": key,
+                            "groupLabel": page_id,
+                            "visible": True,
+                        },
                         "multiInstance": True,
+                        "restoreState": True,
+                        "keepAlive": True,
                         "order": 0,
                     }
                 ],
-                "backend": {"routes": [], "services": []},
-                "frontend": {"entry": "./frontend/module.js", "stores": [], "slots": []},
+                "backend": {
+                    "entry": "./backend/module.js",
+                    "routePrefix": "/api/" + app.lower() + "/" + module_name.split(".", 1)[1].lower(),
+                },
+                "frontend": {"entry": "./frontend/module.js"},
             },
         )
         (module_root / "frontend/pages").mkdir(parents=True, exist_ok=True)
@@ -181,6 +192,7 @@ class RuntimeKitCliTests(unittest.TestCase):
         self.assertIn("create", stdout)
         module_root = self.root / "apps/DLMS/Platform/modules/DLMS.WorkOrders"
         self.assertTrue((module_root / "module.json").exists())
+        self.assertTrue((module_root / "backend/module.js").exists())
         self.assertTrue((module_root / "backend/routes.js").exists())
         self.assertTrue((module_root / "backend/service.js").exists())
         self.assertTrue((module_root / "frontend/module.js").exists())
@@ -195,13 +207,23 @@ class RuntimeKitCliTests(unittest.TestCase):
         self.assertEqual([page["id"] for page in manifest["pages"]], ["WorkOrders", "WorkOrdersQueue", "WorkOrdersInsights"])
         self.assertEqual(manifest["pages"][0]["menu"]["groupId"], "workorders")
         self.assertEqual(manifest["pages"][0]["menu"]["groupLabel"], "Work Orders")
-        self.assertEqual(manifest["pages"][0]["menu"]["icon"], "inventory")
-        self.assertEqual(manifest["pages"][1]["navigation"]["groupId"], "workorders")
-        self.assertEqual(manifest["backend"]["routes"][0]["path"], "/")
+        self.assertNotIn("name", manifest["pages"][0])
+        self.assertNotIn("navigation", manifest["pages"][0])
+        self.assertNotIn("icon", manifest["pages"][0]["menu"])
+        self.assertNotIn("permissions", manifest)
+        self.assertNotIn("metadata", manifest)
+        self.assertNotIn("routes", manifest["backend"])
+        self.assertNotIn("services", manifest["backend"])
+        self.assertNotIn("initOrder", manifest["backend"])
+        self.assertEqual(manifest["backend"]["entry"], "./backend/module.js")
         self.assertEqual(manifest["backend"]["routePrefix"], "/api/dlms/work-orders")
-        self.assertEqual(manifest["frontend"]["stores"][0]["name"], "WorkOrdersStore")
-        self.assertEqual(manifest["frontend"]["stores"][0]["scope"], "module")
-        self.assertEqual(manifest["frontend"]["stores"][0]["pages"], ["WorkOrders", "WorkOrdersQueue", "WorkOrdersInsights"])
+        self.assertEqual(manifest["frontend"], {"entry": "./frontend/module.js"})
+
+        backend_entry = (module_root / "backend/module.js").read_text(encoding="utf-8")
+        self.assertIn("runtime.container.register('dlmsWorkOrdersService'", backend_entry)
+        frontend_entry = (module_root / "frontend/module.js").read_text(encoding="utf-8")
+        self.assertIn("defineModule", frontend_entry)
+        self.assertIn("registerPage", frontend_entry)
 
         descriptor = read_json(self.root / "apps/DLMS/Platform/modules/module-descriptor.json")
         names = [entry["name"] for entry in descriptor["modules"]]
@@ -224,6 +246,106 @@ class RuntimeKitCliTests(unittest.TestCase):
         self.assertFalse(
             (self.root / "apps/DLMS/Platform/modules/DLMS.DryRunModule").exists()
         )
+
+    def test_add_store_keeps_frontend_only_module_frontend_only(self):
+        module_path = self.root / "apps/DLMS/Platform/modules/DLMS.Inventory/module.json"
+        manifest = read_json(module_path)
+        manifest.pop("backend", None)
+        write_json(module_path, manifest)
+
+        code, _, stderr = self.run_cli(
+            [
+                "add",
+                "store",
+                "DLMS.Inventory",
+                "InventoryStore",
+                "--workspace",
+                str(self.root),
+            ]
+        )
+
+        self.assertEqual(code, 0, stderr)
+        updated = read_json(module_path)
+        self.assertNotIn("backend", updated)
+        self.assertEqual(updated["frontend"], {"entry": "./frontend/module.js"})
+        self.assertTrue(
+            (self.root / "apps/DLMS/Platform/modules/DLMS.Inventory/frontend/stores/InventoryStore.js").exists()
+        )
+
+    def test_add_theme_targets_external_root_app_and_remove_theme_cleans_descriptor(self):
+        code, stdout, stderr = self.run_cli(
+            [
+                "add",
+                "theme",
+                "--workspace",
+                str(self.root),
+            ]
+        )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("Theme target: DLMS", stdout)
+        descriptor_path = self.root / "apps/DLMS/Platform/modules/module-descriptor.json"
+        descriptor = read_json(descriptor_path)
+        self.assertEqual(descriptor["themeSet"], "styles/themeset.js")
+        self.assertEqual(descriptor["styles"], ["styles/dlms.css"])
+        self.assertEqual(descriptor["assets"], "assets")
+        self.assertEqual(descriptor["static"], "static")
+
+        app_root = self.root / "apps/DLMS/Platform"
+        theme_source = (app_root / "styles/themeset.js").read_text(encoding="utf-8")
+        self.assertIn("RuntimeKit generated root-app theme set", theme_source)
+        self.assertIn("brand: '#9d174d'", theme_source)
+        self.assertTrue((app_root / "styles/dlms.css").exists())
+        self.assertTrue((app_root / "assets/.gitkeep").exists())
+        self.assertTrue((app_root / "static/.gitkeep").exists())
+
+        code, stdout, stderr = self.run_cli(
+            [
+                "remove",
+                "theme",
+                "--workspace",
+                str(self.root),
+                "--yes",
+            ]
+        )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("Theme target: DLMS", stdout)
+        descriptor = read_json(descriptor_path)
+        self.assertNotIn("themeSet", descriptor)
+        self.assertNotIn("styles", descriptor)
+        self.assertNotIn("assets", descriptor)
+        self.assertNotIn("static", descriptor)
+        self.assertFalse((app_root / "styles/themeset.js").exists())
+        self.assertFalse((app_root / "styles/dlms.css").exists())
+        self.assertTrue((app_root / "assets/.gitkeep").exists())
+        self.assertTrue((app_root / "static/.gitkeep").exists())
+
+    def test_theme_commands_refuse_default_runtime_theme(self):
+        (self.root / "local.properties").write_text("root.app=DISC\n", encoding="utf-8")
+
+        code, _stdout, stderr = self.run_cli(
+            [
+                "add",
+                "theme",
+                "--workspace",
+                str(self.root),
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("default runtime theme is protected", stderr)
+
+        code, _stdout, stderr = self.run_cli(
+            [
+                "remove",
+                "theme",
+                "--workspace",
+                str(self.root),
+                "--yes",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("default runtime theme is protected", stderr)
 
     def test_add_page_store_backend_include_and_dependency(self):
         self.run_cli(["add", "module", "DLMS.WorkOrders", "--workspace", str(self.root)])
@@ -295,12 +417,16 @@ class RuntimeKitCliTests(unittest.TestCase):
         self.assertIn("WorkOrderDetails", page_ids)
         detail_page = next(page for page in manifest["pages"] if page["id"] == "WorkOrderDetails")
         self.assertEqual(detail_page["menu"]["groupId"], "workorders")
-        self.assertEqual(detail_page["navigation"]["groupLabel"], "Work Orders")
+        self.assertEqual(detail_page["menu"]["groupLabel"], "Work Orders")
         self.assertIn("OMS.ReceiptModule", manifest["dependencies"])
-        self.assertEqual(manifest["backend"]["routes"][0]["path"], "/api/work-orders")
-        store_names = [store["name"] for store in manifest["frontend"]["stores"]]
-        self.assertIn("WorkOrdersDetailStore", store_names)
-        self.assertIn("WorkOrderDetails", manifest["frontend"]["stores"][0]["pages"])
+        self.assertEqual(manifest["backend"], {
+            "entry": "./backend/module.js",
+            "routePrefix": "/api/dlms/work-orders",
+        })
+        self.assertEqual(manifest["frontend"], {"entry": "./frontend/module.js"})
+        self.assertTrue(
+            (self.root / "apps/DLMS/Platform/modules/DLMS.WorkOrders/frontend/stores/WorkOrdersDetailStore.js").exists()
+        )
 
         descriptor = read_json(self.root / "apps/DLMS/Platform/modules/module-descriptor.json")
         self.assertEqual(descriptor["includes"][0]["module"], "OMS.ReceiptModule")

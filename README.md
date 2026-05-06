@@ -43,6 +43,7 @@ runtimekit add page APP.WorkOrders WorkOrderDetails
 runtimekit add store APP.WorkOrders WorkOrdersStore
 runtimekit add dependency APP.WorkOrders OTHER.SharedFeature
 runtimekit add include OTHER.SharedFeature --app APP
+runtimekit add theme --app APP
 runtimekit prepare
 runtimekit inspect runtime
 runtimekit run browser --open
@@ -50,6 +51,7 @@ runtimekit run electron
 runtimekit release make --target mac-dmg
 runtimekit clean --target build --target installer --dry-run
 runtimekit remove module APP.WorkOrders --dry-run
+runtimekit remove theme --app APP --yes
 ```
 
 Destructive commands require `--yes` unless `--dry-run` is used.
@@ -60,13 +62,28 @@ Destructive commands require `--yes` unless `--dry-run` is used.
 
 - Three visible pages in the same navigation group.
 - A module-scoped frontend store with fake data for every generated page.
-- Backend route and service files returning sample data.
-- `module.json` page, menu, navigation, icon, restore-state, and keep-alive metadata.
+- `backend/module.js`, route, and service files returning sample data.
+- Strict `module.json` with page-level `pageType`, `icon`, `menu`, restore-state, keep-alive, `frontend.entry`, and `backend.routePrefix`.
 - MUI/platform UI page templates using cards, metrics, status pills, and data tables.
 
 `runtimekit add page` adds the new page under the module's existing navigation group by default,
-updates store page metadata, refreshes sample data, and keeps the generated frontend module export
-aligned with `module.json`.
+refreshes sample data, and keeps the generated frontend module export aligned with `module.json`.
+
+The CLI does not write deprecated manifest fields such as `permissions`, `metadata`,
+`backend.routes`, `backend.services`, `backend.initOrder`, `frontend.stores`, or
+`frontend.slots`. Runtime behavior belongs in `frontend/module.js` and
+`backend/module.js`.
+
+`runtimekit add theme` adds root-app theme resources for an external app. By default
+it targets the `root.app` configured in `local.properties`; use `--app APP` to be
+explicit. It writes `styles/themeset.js`, a companion CSS file, `assets/`, `static/`,
+and wires `themeSet`, `styles`, `assets`, and `static` into the app
+`module-descriptor.json`. The generated token set intentionally uses a visibly
+different palette from the default runtime theme so stakeholders can see the
+composition effect immediately.
+
+`runtimekit remove theme` removes only external app theme wiring. The default
+runtime/core theme cannot be edited or deleted by this CLI.
 
 ## Release Artifacts
 
